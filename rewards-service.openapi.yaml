@@ -1,0 +1,185 @@
+openapi: 3.0.3
+info:
+  title: Rewards Service
+  version: 1.0.0
+  description: |
+    Catalogue of rewards a user can claim. Claiming a reward with `cost > 0`
+    debits the user's wallet in the Wallet service (POST /wallets/{id}/debit,
+    reference = "claim:<claimId>"). If the wallet rejects the debit, the claim
+    is recorded with status REJECTED and this endpoint returns 409.
+
+    Business rules:
+      - `stock` decrements on every FULFILLED claim; null = unlimited.
+      - `maxClaimsPerUser` counts FULFILLED claims only; null = unlimited.
+      - A REJECTED claim does not consume stock or count toward the limit.
+      - Claims require an `Idempotency-Key`; a replay returns the original
+        result (including a 409 if that is what originally happened).
+servers:
+  - url: http://127.0.0.1:8082
+paths:
+  /rewards:
+    get:
+      summary: List the catalogue
+      responses:
+        "200":
+          description: Rewards
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rewards:
+                    type: array
+                    items: { $ref: "#/components/schemas/Reward" }
+  /rewards/{rewardId}:
+    get:
+      summary: Get one reward, including current stock
+      parameters: [{ $ref: "#/components/parameters/RewardId" }]
+      responses:
+        "200":
+          description: Reward
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Reward" }
+        "404":
+          description: REWARD_NOT_FOUND
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /rewards/{rewardId}/claims:
+    post:
+      summary: Claim a reward, debiting the wallet by `cost`
+      parameters:
+        - $ref: "#/components/parameters/RewardId"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId, walletId]
+              properties:
+                userId: { type: string }
+                walletId: { type: string, format: uuid }
+      responses:
+        "201":
+          description: Claim FULFILLED. `walletTransactionId` references the debit in the Wallet ledger.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Claim" }
+        "400":
+          description: IDEMPOTENCY_KEY_REQUIRED
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: REWARD_NOT_FOUND
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: |
+            INSUFFICIENT_BALANCE (error includes `claimId` of the REJECTED claim and `cost`),
+            REWARD_OUT_OF_STOCK, or ALREADY_CLAIMED. Wallet balance is unchanged in all three cases.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: WALLET_NOT_FOUND (walletId unknown to Wallet service) or IDEMPOTENCY_MISMATCH
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502":
+          description: WALLET_UNAVAILABLE — Wallet service could not be reached
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /claims/{claimId}:
+    get:
+      summary: Get a claim by id
+      parameters:
+        - name: claimId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Claim
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Claim" }
+        "404":
+          description: CLAIM_NOT_FOUND
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /users/{userId}/claims:
+    get:
+      summary: All claims for a user, FULFILLED and REJECTED
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Claims
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  userId: { type: string }
+                  claims:
+                    type: array
+                    items: { $ref: "#/components/schemas/Claim" }
+  /admin/reset:
+    post:
+      summary: Test-only. Deletes all claims and restores catalogue stock.
+      responses:
+        "204": { description: Reset }
+components:
+  parameters:
+    RewardId:
+      name: rewardId
+      in: path
+      required: true
+      schema: { type: string }
+  schemas:
+    Reward:
+      type: object
+      properties:
+        rewardId: { type: string, example: rw-coffee }
+        name: { type: string }
+        cost: { type: integer, description: Debited from the wallet on claim. 0 = free. }
+        stock: { type: integer, nullable: true, description: Remaining units; null = unlimited }
+        maxClaimsPerUser: { type: integer, nullable: true }
+    Claim:
+      type: object
+      properties:
+        claimId: { type: string, format: uuid }
+        rewardId: { type: string }
+        userId: { type: string }
+        walletId: { type: string, format: uuid }
+        status: { type: string, enum: [PENDING, FULFILLED, REJECTED] }
+        debitedAmount: { type: integer }
+        walletTransactionId: { type: string, format: uuid, nullable: true }
+        rejectionReason: { type: string, nullable: true, enum: [INSUFFICIENT_BALANCE, null] }
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+          additionalProperties: true
+x-seed-catalogue:
+  - { rewardId: rw-coffee,     name: Coffee voucher,      cost: 25000,  stock: 100,  maxClaimsPerUser: null }
+  - { rewardId: rw-headphones, name: Wireless headphones, cost: 750000, stock: 3,    maxClaimsPerUser: 1 }
+  - { rewardId: rw-badge,      name: Early adopter badge, cost: 0,      stock: null, maxClaimsPerUser: 1 }
